@@ -1,3 +1,5 @@
+#include <Arduino.h>
+
 /**
  * Steins;Gate — 世界线变动探测仪 + NTP 时钟 (节能版)
  * ESP32 + 8位数码管 (共阴极)
@@ -115,6 +117,19 @@ SettleStep settleStep = STEP_FLASH1;
 unsigned long settleStepStart = 0;
 bool   settleDone[NUM_DIGITS];
 unsigned long lastFlashChange = 0;
+
+// ============================================================
+// 前置声明 (Arduino .ino → C++ 需要)
+// ============================================================
+void allSegmentsOff();
+void allDigitsOff();
+void showDigit(int pos, uint8_t number, bool dot, unsigned long holdUs);
+bool tryNtpSync();
+void scheduleNextWifi(unsigned long delayMs);
+void updateClockBuffer();
+void initNewCycle();
+void updateAnimation(unsigned long now);
+void checkWifiSchedule(unsigned long now);
 
 // ============================================================
 // 数码管驱动
@@ -310,58 +325,6 @@ void initNewCycle() {
 }
 
 // ============================================================
-// 主循环
-// ============================================================
-void loop() {
-  static int currentDig = 0;
-  unsigned long now = millis();
-
-  // ---- 判断该位状态 ----
-  bool isScrolling = false;
-  bool isShowingClock = (state == SHOW_CLOCK);
-
-  if (state == SCROLLING && !settleDone[currentDig])
-    isScrolling = true;
-  else if (state == SETTLING && !settleDone[currentDig] && currentDig != settleIndex)
-    isScrolling = true;
-
-  bool nixieBlank = isScrolling && (random(100) < 8);
-
-  if (isScrolling && now - digitLastChange[currentDig] >= (unsigned long)digitInterval[currentDig]) {
-    displayBuffer[currentDig] = random(10);
-    digitLastChange[currentDig] = now;
-    digitInterval[currentDig] = random(30, 80);
-  }
-
-  // ---- 显示 ----
-  if (nixieBlank) {
-    allDigitsOff(); allSegmentsOff();
-    digitalWrite(DIG_PINS[currentDig], LOW);
-    delayMicroseconds(1800);
-    digitalWrite(DIG_PINS[currentDig], HIGH);
-  } else if (isScrolling) {
-    showDigit(currentDig, displayBuffer[currentDig], dotFlags[currentDig], 1800);
-  } else if (state == SETTLING && currentDig == settleIndex) {
-    showDigit(currentDig, displayBuffer[currentDig], dotFlags[currentDig], 1800);
-  } else if (isShowingClock) {
-    showDigit(currentDig, targetDigits[currentDig], dotFlags[currentDig], 1800);
-  } else {
-    showDigit(currentDig, targetDigits[currentDig], dotFlags[currentDig], 1800);
-  }
-
-  currentDig = (currentDig + 1) % NUM_DIGITS;
-
-  // ---- 每扫描一圈 ----
-  if (currentDig == 0) {
-    updateAnimation(now);
-    if (state == SHOW_CLOCK) updateClockBuffer();
-
-    // WiFi 对时调度检查 (非阻塞: 只检查时间到了没)
-    checkWifiSchedule(now);
-  }
-}
-
-// ============================================================
 // 动画状态机
 // ============================================================
 void updateAnimation(unsigned long now) {
@@ -487,5 +450,57 @@ void checkWifiSchedule(unsigned long now) {
       Serial.printf("[重试] 首次对时仍未成功, %dmin后再试\n",
                     (int)(RETRY_INTERVAL / 60000));
     }
+  }
+}
+
+// ============================================================
+// 主循环
+// ============================================================
+void loop() {
+  static int currentDig = 0;
+  unsigned long now = millis();
+
+  // ---- 判断该位状态 ----
+  bool isScrolling = false;
+  bool isShowingClock = (state == SHOW_CLOCK);
+
+  if (state == SCROLLING && !settleDone[currentDig])
+    isScrolling = true;
+  else if (state == SETTLING && !settleDone[currentDig] && currentDig != settleIndex)
+    isScrolling = true;
+
+  bool nixieBlank = isScrolling && (random(100) < 8);
+
+  if (isScrolling && now - digitLastChange[currentDig] >= (unsigned long)digitInterval[currentDig]) {
+    displayBuffer[currentDig] = random(10);
+    digitLastChange[currentDig] = now;
+    digitInterval[currentDig] = random(30, 80);
+  }
+
+  // ---- 显示 ----
+  if (nixieBlank) {
+    allDigitsOff(); allSegmentsOff();
+    digitalWrite(DIG_PINS[currentDig], LOW);
+    delayMicroseconds(1800);
+    digitalWrite(DIG_PINS[currentDig], HIGH);
+  } else if (isScrolling) {
+    showDigit(currentDig, displayBuffer[currentDig], dotFlags[currentDig], 1800);
+  } else if (state == SETTLING && currentDig == settleIndex) {
+    showDigit(currentDig, displayBuffer[currentDig], dotFlags[currentDig], 1800);
+  } else if (isShowingClock) {
+    showDigit(currentDig, targetDigits[currentDig], dotFlags[currentDig], 1800);
+  } else {
+    showDigit(currentDig, targetDigits[currentDig], dotFlags[currentDig], 1800);
+  }
+
+  currentDig = (currentDig + 1) % NUM_DIGITS;
+
+  // ---- 每扫描一圈 ----
+  if (currentDig == 0) {
+    updateAnimation(now);
+    if (state == SHOW_CLOCK) updateClockBuffer();
+
+    // WiFi 对时调度检查 (非阻塞: 只检查时间到了没)
+    checkWifiSchedule(now);
   }
 }
