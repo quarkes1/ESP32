@@ -16,6 +16,8 @@
 
 #include <TFT_eSPI.h>
 #include <DHT.h>
+#include "animation.h"
+#include "badapple.h"
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -46,6 +48,15 @@ TFT_eSPI tft = TFT_eSPI();
 #define DHTPIN        17
 #define DHTTYPE       DHT22
 DHT dht(DHTPIN, DHTTYPE);
+
+// Touch (GPIO13 = T4) — toggle display mode
+#define TOUCH_PIN       T4
+#define TOUCH_SAMPLE    200           // Read every 200 ms
+#define TOUCH_COOLDOWN  600           // Min ms between toggles
+
+int  displayMode   = 0;               // 0 = three-body + DHT22, 1 = animation
+bool touchWasActive = false;
+unsigned long lastToggle = 0;
 
 // Chart sub-areas
 #define TEMP_TOP      (CHART_TOP + 8)
@@ -424,6 +435,30 @@ void initSimulation() {
 }
 
 // ============================================================
+// Setup Animation (do not edit but notice the font config that may effect following steps)
+// ============================================================
+void setupAnimation(){
+    Serial.println("Playing SetupAnimation");
+    
+    int MAG = 2 ;
+    int dpixel = 8*MAG;
+    int C_x = TFT_WIDTH / 2;
+    int C_y = TFT_HEIGHT / 2 ;
+    
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.setTextSize(MAG);
+    tft.drawString("El Psy Congroo", C_x, C_y - dpixel);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("Developed by" , C_x , C_y + 2*dpixel);
+    tft.drawString("Aurolystant" ,  C_x, C_y + 3*dpixel);
+    tft.setTextDatum(TL_DATUM);
+    
+    delay(2000);
+    tft.fillScreen(TFT_BLACK);
+}
+
+// ============================================================
 // Setup
 // ============================================================
 void setup() {
@@ -440,7 +475,10 @@ void setup() {
   #endif
 
   randomSeed(analogRead(0) + micros());
-
+  
+  //Setup Animation
+  setupAnimation();  
+  
   // DHT22
   dht.begin();
   Serial.println("DHT22 sensor started");
@@ -454,46 +492,119 @@ void setup() {
 }
 
 // ============================================================
+// Switch display mode
+// ============================================================
+void switchMode() {
+  displayMode = 1 - displayMode;
+  tft.fillScreen(TFT_BLACK);
+
+  Serial.printf("\n=== Mode: %s ===\n", displayMode == 0 ? "Monitor" : "Animation");
+
+  if (displayMode == 0) {
+    badappleClose();     // Release SPIFFS
+    initSimulation();
+    for (int i = 0; i < NUM_BODIES; i++) drawBody(i);
+    drawChart();
+  } else {
+    if (!badappleInit(&tft)) {
+      // Fallback if no SPIFFS/badapple.rle
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.setTextSize(2);
+      tft.drawString("No badapple.rle", 120, 100);
+      tft.setTextSize(1);
+      tft.drawString("Run: pio run -t uploadfs", 120, 130);
+      tft.setTextDatum(TL_DATUM);
+    }
+  }
+}
+
+// ============================================================
+// Touch handler: detect tap → toggle mode
+// ============================================================
+void handleTouch() {
+  static uint16_t baseline = 0;
+  uint16_t raw = touchRead(TOUCH_PIN);
+  if (raw > baseline) baseline = raw;
+
+  int16_t delta = (int16_t)baseline - (int16_t)raw;
+  bool touched  = (delta > 15);
+  unsigned long now = millis();
+
+  if (touched && !touchWasActive && (now - lastToggle > TOUCH_COOLDOWN)) {
+    switchMode();
+    lastToggle = now;
+  }
+  touchWasActive = touched;
+
+  Serial.printf("[Touch] raw=%d  baseline=%d  delta=%d  mode=%d\n",
+                raw, baseline, delta, displayMode);
+}
+
+// ============================================================
 // Main Loop
 // ============================================================
 void loop() {
   static unsigned long lastReport = 0, frameCount = 0;
+  static unsigned long lastTouch  = 0;
+  unsigned long now = millis();
 
-  // ---- Three-body ----
-  for (int i = 0; i < NUM_BODIES; i++) decayTrail(i);
-  for (int i = 0; i < NUM_BODIES; i++) eraseBody(i);
-  for (int s = 0; s < SUBSTEPS; s++) stepSub(DT_SUB);
-  for (int i = 0; i < NUM_BODIES; i++) pushTrail(i);
-  for (int i = 0; i < NUM_BODIES; i++) drawTrail(i);
-  for (int i = 0; i < NUM_BODIES; i++) drawBody(i);
-
-  if (isEjected()) {
-    Serial.println(">>> Ejection — reset <<<");
-    tft.fillRect(0, 0, TFT_WIDTH, SIM_BOTTOM + 1, TFT_BLACK);
-    randomSeed(micros());
-    initSimulation();
-    for (int i = 0; i < NUM_BODIES; i++) drawBody(i);
+  // ---- Touch: sample every 200 ms (both modes) ----
+  if (now - lastTouch >= TOUCH_SAMPLE) {
+    handleTouch();
+    lastTouch = now;
   }
 
-  // ---- DHT22: read every 2 s, redraw chart on new data ----
-  unsigned long now = millis();
+  // ---- DHT22: collect data in both modes (silent in mode 1) ----
   if (now - lastDHTRead >= 2000) {
     readDHT22();
-    drawChart();
     lastDHTRead = now;
   }
 
-  // ---- FPS ----
-  frameCount++;
-  if (now - lastReport >= 5000) {
-    float fps = frameCount * 1000.0f / (now - lastReport);
-    Serial.printf("FPS: %.1f\n", fps);
-    lastReport = now;
-    frameCount = 0;
+  // ---- Mode 0: Three-body + DHT22 display ----
+  if (displayMode == 0) {
+    for (int i = 0; i < NUM_BODIES; i++) decayTrail(i);
+    for (int i = 0; i < NUM_BODIES; i++) eraseBody(i);
+    for (int s = 0; s < SUBSTEPS; s++) stepSub(DT_SUB);
+    for (int i = 0; i < NUM_BODIES; i++) pushTrail(i);
+    for (int i = 0; i < NUM_BODIES; i++) drawTrail(i);
+    for (int i = 0; i < NUM_BODIES; i++) drawBody(i);
+
+    if (isEjected()) {
+      Serial.println(">>> Ejection — reset <<<");
+      tft.fillRect(0, 0, TFT_WIDTH, SIM_BOTTOM + 1, TFT_BLACK);
+      randomSeed(micros());
+      initSimulation();
+      for (int i = 0; i < NUM_BODIES; i++) drawBody(i);
+    }
+
+    // Redraw chart only in monitor mode (data collected in both modes)
+    static unsigned long lastChartDraw = 0;
+    if (now - lastChartDraw >= 2000) {
+      drawChart();
+      lastChartDraw = now;
+    }
+
+    // Info branding (monitor mode only)
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString("Aurolystant Console", 2, 2);
+
+    frameCount++;
+    if (now - lastReport >= 5000) {
+      float fps = frameCount * 1000.0f / (now - lastReport);
+      Serial.printf("FPS: %.1f\n", fps);
+      lastReport = now;
+      frameCount = 0;
+    }
+  } else {
+    // Mode 1: Bad Apple playback
+    static unsigned long baLastFrame = 0;
+    if (now - baLastFrame >= 62) {   // ~16 fps
+      if (!badappleNextFrame()) {
+        badappleReset();             // Loop
+      }
+      baLastFrame = now;
+    }
   }
-  
-  //---- info ----
-  tft.setTextSize(2);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("Aurolystant Console", 0, 1);
 }
